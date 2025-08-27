@@ -3,8 +3,6 @@ package kubevirt
 import (
 	"context"
 	"fmt"
-	"os/signal"
-	"syscall"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -26,11 +24,7 @@ const (
 	maxDelay     = 2 * time.Minute
 )
 
-func (e *MetricsExporter) startSyncService() {
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-	defer close(e.done)
-
+func (e *MetricsExporter) startSyncService(ctx context.Context) {
 	opts := []informers.SharedInformerOption{
 		informers.WithTweakListOptions(func(lo *metav1.ListOptions) {
 			lo.LabelSelector = "kubevirt.io=virt-launcher"
@@ -104,7 +98,11 @@ func (e *MetricsExporter) connectWithRetry(pod *corev1.Pod) {
 		// Connection successful
 		klog.Infof("connected to Libvirt socket for pod %s/%s (attempt %d)", pod.Namespace, pod.Name, attempt+1)
 		e.mu.Lock()
-		e.sockets[types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}] = *socket
+		e.vmis[types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}] = virtualMachineInstance{
+			namespace:     pod.Namespace,
+			name:          pod.Labels["vm.kubevirt.io/name"],
+			libvirtClient: socket,
+		}
 		e.mu.Unlock()
 		return
 	}
@@ -120,13 +118,13 @@ func (e *MetricsExporter) onPodDelete(obj any) {
 	klog.Infof("pod %s/%s deleted, closing Libvirt connection", pod.Namespace, pod.Name)
 
 	e.mu.Lock()
-	if socket, exists := e.sockets[types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}]; exists {
-		if err := socket.Close(); err != nil {
+	if vmi, exists := e.vmis[types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}]; exists {
+		if err := vmi.libvirtClient.Close(); err != nil {
 			klog.Errorf("failed to close Libvirt connection for pod %s/%s: %v", pod.Namespace, pod.Name, err)
 		} else {
 			klog.Infof("closed Libvirt connection for pod %s/%s", pod.Namespace, pod.Name)
 		}
-		delete(e.sockets, types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name})
+		delete(e.vmis, types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name})
 	}
 
 	e.mu.Unlock()
